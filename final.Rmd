@@ -1,0 +1,517 @@
+---
+title: "Time Series Individual Project"
+author: "Ma.Xiaoran"
+date: "2018/12"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+
+# Data Processing
+I first clean up the data and transform id's into area names.
+```{r}
+setwd("C:/Users/xrma/Desktop/Fall Quarter 2018/Time Series/Individual Project")
+library(imputeTS)
+library(data.table)
+library(forecast)
+library(quantmod) 
+library(tseries)
+library(lubridate)
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(reshape2)
+library(Metrics)
+
+##### clean employment data ####
+city = as.data.frame(read_xlsx("ces_data.xlsx",sheet = "description",skip = 7))
+city$city_code = substr(city$`area_code       area_name`, 1,5)
+city$city_name = substring(city$`area_code       area_name`, 9, last = 1000000L)
+city_df = city[c("city_code", "city_name")]
+
+# employment data 
+employ = as.data.frame(read_xlsx("ces_data.xlsx",sheet="employment",skip = 3))
+employ$city_code = substr(employ$`Series ID`, 6, 10)
+employ_df = left_join(employ, city_df, by = "city_code")
+employ_df = employ_df[,c(1,ncol(employ_df)-1,ncol(employ_df),2:(ncol(employ_df)-2))]
+employ_df[,c(110,111)] = NULL
+rownames(employ_df) = employ_df$city_name
+employ_df[,c(1:3)] = NULL
+colnames(employ_df) = seq(as.Date("2010/1/1"), 
+                        by = "month", length.out = length(colnames(employ_df)))
+
+# wage data
+wage = as.data.frame(read_xlsx("ces_data.xlsx",sheet="weekly_wages",skip = 3))
+wage$city_code = substr(wage$`Series ID`, 6, 10)
+wage_df = left_join(wage, city_df, by = "city_code")
+wage_df = wage_df[,c(1,ncol(wage_df)-1,ncol(wage_df),2:(ncol(wage_df)-2))]
+wage_df[,c(110,111)] = NULL
+rownames(wage_df) = wage_df$city_name
+wage_df[,c(1:3)] = NULL
+colnames(wage_df) = seq(as.Date("2010/1/1"), 
+                        by = "month", length.out = length(colnames(wage_df)))
+
+```
+
+Now Data has been processed. We have 2 datasets, employ_df & wage_df. We use these two datasets to do analysis.
+
+
+
+
+# Question 4 - imputation NA
+I think it may be better to imputate missing values before any analysis. I want to find the best way to imputate missing values. I choose to use spline.But we could also use ARIMA, Kalman filter, etc to do the same. An interesting method is to find out the most similar area (similar trend or say parallel) that has all the data and impute the missing values according to its trend.
+```{r}
+# A visulization on one imputation
+temp = as.numeric(wage_df[9,])
+im = na.interpolation(temp,option = "spline")
+plotNA.imputations(temp,im)
+
+# Impute all the missing values
+for (i in 1:nrow(wage_df)){
+  if(sum(is.na(wage_df[i,]))>0){
+    temp = as.numeric(wage_df[i,])
+    im = na.interpolation(temp,option = "spline")
+    wage_df[i,] = im
+  }
+}
+```
+
+
+# Question 1
+Find out the best models for employ and wage respectively. I use visualization to see which models are appropriate. The conclusion is that I can use trend+seasonality OR a SARIMA model. I tried both and SARIMA acheive a lower RMSE.
+
+## see the trend for wage and employ
+```{r}
+wage_dft = as.data.frame(t(wage_df))
+wage_dft$time = rownames(wage_dft)
+employ_dft = as.data.frame(t(employ_df))
+employ_dft$time = rownames(employ_dft)
+wagemeltdf <- melt(wage_dft,id = "time")
+employmeltdf <- melt(employ_dft,id = "time")
+
+ggplot(wagemeltdf[1:(106*8),],aes(x=time,y=value,colour=variable,group=variable)) + geom_line()
+
+
+ggplot(employmeltdf[107:(106*8),],aes(x=time,y=value,colour=variable,group=variable)) + geom_line()
+
+```
+From the graph, it may be good to use trend and seasonality to predict employ data but it may not be approprate to do the same for wage data.
+
+
+## Use trend and seasonality to predict employ and wage data and calculate error
+Seasonal component is a column called season, which contains categorical variables 1:4. Trend is a numerical column count from 1 to the end for each area.
+```{r}
+# wage
+trainwage = wage_dft[1:96,]
+testwage = wage_dft[97:nrow(wage_dft),]
+
+trainmeltdf <- melt(trainwage,id = "time")
+testmeltdf <- melt(testwage,id = "time")
+
+trainmeltdf$trend = 1:(8*12)
+trainmeltdf$season = rep(c(1,2,3,4),each=3)
+trainmeltdf$season = as.factor(trainmeltdf$season)
+trainmeltdf$variable = as.factor(trainmeltdf$variable)
+testmeltdf$trend = 97:106
+testmeltdf$season = c(rep(c(1,2,3),each=3),4)
+testmeltdf$season = as.factor(testmeltdf$season)
+testmeltdf$variable = as.factor(testmeltdf$variable)
+
+wageMod1 = lm(value~trend+season+variable,data = trainmeltdf)
+# summary(wageMod1)
+
+wagePre1 = predict(wageMod1,newdata = testmeltdf)
+RMSE_wage = sqrt(sum((as.numeric(wagePre1) - as.numeric(testmeltdf$value))^2) / nrow(testmeltdf))
+RMSE_wage
+
+
+
+
+# employ
+trainem = employ_dft[1:96,]
+testem = employ_dft[97:nrow(employ_dft),]
+
+trainmeltdf <- melt(trainem,id = "time")
+testmeltdf <- melt(testem,id = "time")
+
+trainmeltdf$trend = 1:(8*12)
+trainmeltdf$season = rep(c(1,2,3,4),each=3)
+trainmeltdf$season = as.factor(trainmeltdf$season)
+trainmeltdf$variable = as.factor(trainmeltdf$variable)
+testmeltdf$trend = 97:106
+testmeltdf$season = c(rep(c(1,2,3),each=3),4)
+testmeltdf$season = as.factor(testmeltdf$season)
+testmeltdf$variable = as.factor(testmeltdf$variable)
+
+employMod1 = lm(value~trend+season+variable,data = trainmeltdf)
+#summary(employMod1)
+
+employPre1 = predict(employMod1,newdata = testmeltdf)
+RMSE_employ = sqrt(sum((as.numeric(employPre1) - as.numeric(testmeltdf$value))^2) / nrow(testmeltdf))
+RMSE_employ
+```
+Using trend and seasonality:
+RMSE for wage is 49.01
+RMSE for employ is 124.26
+
+
+
+## Use ARIMA to predict employ and wage data and calculate error
+The idea is to first use auto ARIMA to find out all the coefficients p,d,q,P,D,Q in ARIMA(p,d,q)*SARIMA(P,D,Q) and choose the most frequent p,d,q,P,D,Q for our model.
+```{r}
+# wage
+# following are the auto ARIMA. It takes a while to run so I denote them. Please feel free to run them.
+
+# parallwage = c()
+# for(i in 1:(ncol(trainwage)-1)){
+#   series = ts(as.numeric(trainwage[,i]),start = c(2010,1),end = c(2017,12),frequency = 12)
+#   fit.arima = auto.arima(series)
+#   par = fit.arima$arma
+#   parallwage = c(parallwage,par)
+# }
+# parallwage.p = parallwage[c(T,F,F,F,F,F,F)]
+# parallwage.d = parallwage[c(F,F,F,F,F,T,F)]
+# parallwage.q = parallwage[c(F,T,F,F,F,F,F)]
+# parallwage.P = parallwage[c(F,F,T,F,F,F,F)]
+# parallwage.D = parallwage[c(F,F,F,F,F,F,T)]
+# parallwage.Q = parallwage[c(F,F,F,T,F,F,F)]
+
+# I use the following table to choose the parameters that appear most frequently. Please feel free to run them. 
+# table(parallwage.p)
+# table(parallwage.d)
+# table(parallwage.q)
+# table(parallwage.P)
+# table(parallwage.D)
+# table(parallwage.Q)
+
+# best arima(2,1,1) * SARIMA(0,0,1)
+predictions = testwage
+predictions$time = NULL
+
+for ( i in 1:(ncol(trainwage)-1)){
+  series = ts(as.numeric(trainwage[,i]),start = c(2010,1),end = c(2017,12),frequency = 12)
+  predicted = forecast(arima(series,order=c(2,1,1),seasonal = list(order = c(0,0,1))),h=10)$mean
+  predictions[,i] = as.numeric(predicted)
+}
+
+sqrt(sum((predictions - testwage[,-61])^2)/(nrow(testwage)*ncol(testwage)))
+
+
+
+# employ
+# following are the auto ARIMA. It takes a while to run so I denote them. Please feel free to run them.
+
+# parallem = c()
+# for(i in 1:(ncol(trainem)-1)){
+#   series = ts(as.numeric(trainem[,i]),start = c(2010,1),end = c(2017,12),frequency = 12)
+#   fit.arima = auto.arima(series)
+#   par = fit.arima$arma
+#   parallem = c(parallem,par)
+# }
+# parallem.p = parallem[c(T,F,F,F,F,F,F)]
+# parallem.d = parallem[c(F,F,F,F,F,T,F)]
+# parallem.q = parallem[c(F,T,F,F,F,F,F)]
+# parallem.P = parallem[c(F,F,T,F,F,F,F)]
+# parallem.D = parallem[c(F,F,F,F,F,F,T)]
+# parallem.Q = parallem[c(F,F,F,T,F,F,F)]
+
+# I use the following table to choose the parameters that appear most frequently. Please feel free to run them.
+# table(parallem.p)
+# table(parallem.d)
+# table(parallem.q)
+# table(parallem.P)
+# table(parallem.D)
+# table(parallem.Q)
+
+# best arima(2,1,1) * SARIMA(0,1,1)
+predictions = testem
+predictions$time = NULL
+
+for ( i in 1:(ncol(trainem)-1)){
+  series = ts(as.numeric(trainem[,i]),start = c(2010,1),end = c(2017,12),frequency = 12)
+  predicted = forecast(arima(series,order=c(2,1,1),seasonal = list(order=c(0,1,1))),h=10)$mean
+  predictions[,i] = as.numeric(predicted)
+}
+
+sqrt(sum((predictions - testem[,-60])^2)/(nrow(testem)*ncol(testem)))
+```
+
+Using ARIMA:
+RMSE for wage is 26.24
+RMSE for employ is 9.48
+
+
+## Use BSTS to predict employ and wage data and calculate error
+```{r}
+# wage
+predictions = testwage
+predictions$time = NULL
+
+for ( i in 1:(ncol(trainwage)-1)){
+  series = as.numeric(trainwage[,i])
+  ss = AddLocalLinearTrend(list(), series)
+  ss = AddSeasonal(ss, series, nseasons = 4)
+  model1 = bsts(series,
+               state.specification = ss,
+               niter = 2000)
+  pred1 = predict(model1, horizon = 10)$mean
+  predictions[,i] = as.numeric(pred1)
+}
+
+sqrt(sum((predictions - testwage[,-61])^2)/(nrow(testwage)*ncol(testwage)))
+
+
+
+# employ
+predictions = testem
+predictions$time = NULL
+
+for ( i in 1:(ncol(trainem)-1)){
+  series = as.numeric(trainem[,i])
+  ss = AddLocalLinearTrend(list(), series)
+  ss = AddSeasonal(ss, series, nseasons = 4)
+  model1 = bsts(series,
+               state.specification = ss,
+               niter = 2000)
+  pred1 = predict(model1, horizon = 10)$mean
+  predictions[,i] = as.numeric(pred1)
+}
+sqrt(sum((predictions - testem[,-60])^2)/(nrow(testem)*ncol(testem)))
+
+```
+
+Error for BSTS in wage: 25.74
+Error for BSTS in employ: 31.13
+
+From the results above, I use BSTS for wage and ARIMA(2,1,1) * SARIMA(0,1,1) for employ.
+
+
+# Question 2
+Use ARIMA model I got in the previous question to forcast from Nov 2018 to Dec 2019.
+wage:   BSTS
+employ: arima(2,1,1) * SARIMA(0,1,1)
+
+```{r}
+# wage
+predictions19wage = wage_dft[1:14,]
+rownames(predictions19wage) = seq(as.Date("2018/11/1"), 
+                        by = "month", length.out = length(rownames(predictions19wage)))
+predictions19wage$time = NULL
+
+# for ( i in 1:(ncol(wage_dft)-1)){
+#   series = ts(as.numeric(wage_dft[,i]),start = c(2010,1),end = c(2018,10),frequency = 12)
+#   predicted = forecast(arima(series,order=c(2,1,1),seasonal = list(order = c(0,0,1))),h=14)$mean
+#   predictions19wage[,i] = as.numeric(predicted)
+# }
+
+for ( i in 1:(ncol(wage_dft)-1)){
+  series = as.numeric(wage_dft[,i])
+  ss = AddLocalLinearTrend(list(), series)
+  ss = AddSeasonal(ss, series, nseasons = 4)
+  model1 = bsts(series,
+               state.specification = ss,
+               niter = 2000)
+  pred1 = predict(model1, horizon = 14)$mean
+  predictions19wage[,i] = as.numeric(pred1)
+}
+wage_dft_pr = rbind(wage_dft[,1:(ncol(wage_dft)-1)],predictions19wage)
+
+
+
+# employ
+predictions19em = employ_dft[1:14,]
+rownames(predictions19em) = seq(as.Date("2018/11/1"), 
+                        by = "month", length.out = length(rownames(predictions19em)))
+predictions19em$time = NULL
+
+for ( i in 1:(ncol(employ_dft)-1)){
+  series = ts(as.numeric(employ_dft[,i]),start = c(2010,1),end = c(2018,10),frequency = 12)
+  predicted = forecast(arima(series,order=c(2,1,1),seasonal = list(order=c(0,1,1))),h=14)$mean
+  predictions19em[,i] = as.numeric(predicted)
+}
+employ_dft_pr = rbind(employ_dft[,1:(ncol(employ_dft)-1)],predictions19em)
+```
+
+Now the prediction from Nov 2018 to Dec 2019 has been done. And are stored in wage_dft_pr and employ_dft_pr respectively.
+
+
+
+
+# Question 3
+```{r}
+# remove seasonality for wage
+wage_dft_pr_ns = wage_dft_pr
+
+for ( i in 1:(ncol(wage_dft_pr)-1)){
+  series = ts(as.numeric(wage_dft_pr[,i]),start = c(2010,1),end = c(2019,12),frequency = 12)
+  seasonality = decompose(series)$seasonal
+  seasonality2 = as.data.frame(seasonality)[1:12,]
+  wage_dft_pr_ns[,i] = wage_dft_pr_ns[,i] - seasonality2
+}
+plot(wage_dft_pr[,1],type="l",main="Example before removing seasonality",xlab="date",ylab="wage")
+plot(wage_dft_pr_ns[,1],type="l",main="Example after removing seasonality",xlab="date",ylab="wage")
+
+
+# remove seasonality for employ
+employ_dft_pr_ns = employ_dft_pr
+
+for ( i in 1:(ncol(employ_dft_pr)-1)){
+  series = ts(as.numeric(employ_dft_pr[,i]),start = c(2010,1),end = c(2019,12),frequency = 12)
+  seasonality = decompose(series)$seasonal
+  seasonality2 = as.data.frame(seasonality)[1:12,]
+  employ_dft_pr_ns[,i] = employ_dft_pr_ns[,i] - seasonality2
+}
+plot(employ_dft_pr[,10],type="l",main="Example before removing seasonality",xlab="date",ylab="employ")
+plot(employ_dft_pr_ns[,10],type="l",main="Example after removing seasonality",xlab="date",ylab="employ")
+```
+
+
+
+
+# Question 5
+```{r}
+# wage
+wage_ind = wage_dft_pr_ns
+for ( i in 1:ncol(wage_ind)){
+  temp = data.frame(x = wage_ind[,i],x_1 = wage_ind[,i],y = rep(NA,length(wage_ind[,i])))
+  temp$x_1[2:nrow(temp)] = temp$x[1:(nrow(temp)-1)]
+  temp$y[2:nrow(temp)] = ((temp$x[2:nrow(temp)]/temp$x_1[2:nrow(temp)])-1)
+  temp$y[1]=100
+  for(j in 2:nrow(temp)){
+    temp$y[j] = temp$y[j-1] * (1 + temp$y[j])
+  }
+  wage_ind[,i] = temp$y
+}
+
+# employ
+employ_ind = employ_dft_pr_ns
+for ( i in 1:ncol(employ_ind)){
+  temp = data.frame(x = employ_ind[,i],x_1 = employ_ind[,i],y = rep(NA,length(employ_ind[,i])))
+  temp$x_1[2:nrow(temp)] = temp$x[1:(nrow(temp)-1)]
+  temp$y[2:nrow(temp)] = ((temp$x[2:nrow(temp)]/temp$x_1[2:nrow(temp)])-1)
+  temp$y[1]=100
+  for(j in 2:nrow(temp)){
+    temp$y[j] = temp$y[j-1] * (1 + temp$y[j])
+  }
+  employ_ind[,i] = temp$y
+}
+
+```
+
+The indices for wage and employ are calculated and stored in wage_ind and employ_ind respectively.
+
+
+
+
+
+# Question 6
+Use the simple average to combine two indices.
+Note: employ_ind has one less area than wage_ind, when doing the average, remove that area. For that area, simply use its wage index as a proxy of entire index.
+```{r}
+# wrong at 49th
+# unique(colnames(employ_ind)) == unique(colnames(wage_ind)[c(1:48,50:60)]) # all matched
+
+result_ind = wage_ind
+resulttemp = wage_ind[,c(1:48,50:60)]
+result_ind[,c(1:48,50:60)] = (resulttemp + employ_ind) / 2
+```
+
+The average index is stored in result_ind.
+
+
+
+
+
+# Question 7
+First notice that not all areas are matched in the median price data and the index data. I use area name to pick out 14 areas that exist in both data frame and do regression on them. Use area id may result in a larger number of match but from the analysis below, 14 areas are enough to illustrate a significant effect of CEBI on median house price.
+
+```{r}
+d = read.csv("Metro_Zhvi_AllHomes.csv")
+d = d[,c(1,2,169:274)]
+
+result_indr = result_ind[,order(colnames(result_ind))]
+dr = d[order(d$RegionName),]
+
+dr = dr[dr$RegionName %in% colnames(result_indr),]
+
+good=0
+for ( i in dr$RegionName ){
+  x = dr[dr$RegionName==i,3:ncol(dr)]
+  y = result_indr[1:106,colnames(result_indr)==i]
+  regress = lm(y~as.numeric(x))
+  if (summary(regress)$coef[2,4] < 0.1){
+    good = good + 1
+  }
+}
+good
+```
+
+We can see from the result that all 14 regressions are significant. This means the CEBI is a significant predictor for median house price.
+
+
+
+
+# Question 8
+Note, here I first calculate the daily indices. Then pick out all the mondays to indicate weekly indices. Days are actual days. To get weekly and daily indices, I use compound growth.
+$$ \textit{Change_daily} = (\frac{Index_{month2}}{Index_{month1}})^{\frac{1}{\textit{# of days}}} - 1 $$
+In daily indices, since our prediction only includes 2019-12-01, we cannot use interpolation in calculating 2019-12-02 ~ 2019-12-31, which need the prediction of 2020-01-01. So for these period, I use spline to impute. 
+
+
+```{r}
+# daily
+result_ind_d = as.data.frame(matrix(
+  rep(NA,ncol(result_ind)*3652),ncol=ncol(result_ind) ))
+colnames(result_ind_d) = colnames(result_ind)
+r1 = as.character(seq(as.Date("2010/1/1"),as.Date("2019/12/31"), by = "day"))
+rownames(result_ind_d) = r1
+
+for ( i in 1:nrow(result_ind_d)){
+  if(rownames(result_ind_d)[i] %in% rownames(result_ind)){
+    result_ind_d[i,] = result_ind[rownames(result_ind_d)[i],]
+  }
+}
+
+pointer = 1
+for( i in 1:(length(rownames(result_ind))-1)){
+  dint = as.numeric(as.Date(rownames(result_ind)[i+1]) - as.Date(rownames(result_ind)[i]))
+  inc = (result_ind_d[rownames(result_ind)[i+1],] / result_ind_d[rownames(result_ind)[i],])^(1/dint)-1
+  for(j in (pointer+1):(pointer+dint-1)){
+    result_ind_d[j,] = result_ind_d[j-1,] * (inc+1)
+  }
+  pointer = pointer + dint
+}
+
+for ( i in 1:ncol(result_ind_d)){
+  temp = result_ind_d[,i]
+  temp = na.interpolation(temp,option = "spline")
+  result_ind_d[,i] = temp
+}
+
+
+head(result_ind_d[,1:3])
+
+
+# weekly
+# find out the mondays
+times = rownames(result_ind_d)
+weekdays = wday(times, label=TRUE)
+wdf = data.frame(weekdays = weekdays, date = times)
+wdf = wdf[wdf$weekdays=="ÖÜÒ»",]
+result_ind_w = result_ind_d
+result_ind_w$date = rownames(result_ind_w)
+result_ind_w = merge(result_ind_w,wdf,by="date")
+result_ind_w$weekdays = NULL
+rownames(result_ind_w) = result_ind_w$date
+result_ind_w$date = NULL
+
+head(result_ind_w[,1:3])
+```
+
+
+
+
+
+
+
